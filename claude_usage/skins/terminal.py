@@ -61,7 +61,8 @@ METRICS = {
     "osd_width":       440,
     "osd_height":      172,
     "osd_height_scoped": 212,  # +1 Session/Weekly row footprint (2*line_h + row_gap + 2)
-    "codex_rows_height": 80,   # 2 × (osd_height_scoped − osd_height) = two extra rows
+    "codex_header_height": 28,
+    "codex_rows_height": 108,  # two 40px rows plus the provider header
     "osd_radius":      6,
     "osd_padding":     12,
     "osd_row_gap":     8,
@@ -167,11 +168,14 @@ def paint_osd(p: QPainter, rect: QRectF, data, scale: float = 1.0) -> None:
                        body_f)
 
     # codex rows — optional second-provider (OpenAI Codex) 5h + 7d windows.
-    # Mirrors the session/weekly rows exactly and pushes the ticker below
-    # down by two rows via the updated y_bar. Drawn only when active.
+    # Give the second provider its own title, matching the Claude titlebar.
+    # The extra header/rows push the ticker down. Drawn only when active.
     if getattr(data, "codex_available", False):
+        y_header = y_bar + line_h + m["osd_row_gap"] * s
+        draw_text(p, x, y_header + fm.ascent(), "┌─ CODEX",
+                  hex_to_qcolor(t["accent"]), title_f, letter_spacing_px=1.0 * s)
         # codex 5h — mirrors the session row
-        y_row = y_bar + line_h + m["osd_row_gap"] * s
+        y_row = y_header + m["codex_header_height"] * s
         draw_text(p, x, y_row + fm.ascent(), "codex 5h",
                   hex_to_qcolor(t["text_secondary"]), body_f)
         right = f"{data.codex_session_reset_min}m · {int(data.codex_session_pct*100)}%"

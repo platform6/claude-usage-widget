@@ -257,7 +257,8 @@ class TestLoadConfig(unittest.TestCase):
         finally:
             os.unlink(path)
 
-    @unittest.skipIf(os.getuid() == 0, "Cannot test permission errors as root")
+    @unittest.skipIf(os.name == "nt" or os.getuid() == 0,
+                     "Requires POSIX permissions and a non-root user")
     def test_unreadable_file_returns_defaults_with_warning(self) -> None:
         """A file that exists but is not readable returns defaults and warns."""
         with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:

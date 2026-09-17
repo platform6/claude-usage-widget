@@ -13,15 +13,15 @@ every ``poll_seconds``. Between polls — and on RPC failure — the cache is
 served, with expired windows clamped back to zero exactly like the Claude
 sample-fallback path in ``collector.collect_all``.
 
-POSIX-only for now: the reader uses ``select`` on pipes, which does not
-work on Windows. On other platforms ``collect_codex`` reports
-unavailable and the UI simply never shows the Codex rows.
+Pipe reads use ``select`` on POSIX and ``PeekNamedPipe`` on Windows so a
+stalled or partially written response cannot block the refresh thread.
 """
 
 from __future__ import annotations
 
 import json
 import os
+import platform
 import select
 import shutil
 import subprocess
@@ -33,11 +33,45 @@ RPC_TIMEOUT_SECONDS = 12
 DEFAULT_POLL_SECONDS = 300
 CACHE_PATH = Path.home() / ".cache" / "claude-usage" / "codex_limits.json"
 _BIN_CANDIDATES = ("/opt/homebrew/bin/codex", "/usr/local/bin/codex")
+_IS_WINDOWS = os.name == "nt"
+
+
+def _windows_codex_exe(candidate: str) -> str | None:
+    """Resolve npm shims to the native binary; avoid leaving a shell/Node child."""
+    path = Path(candidate)
+    if path.suffix.lower() == ".exe" and path.is_file():
+        return str(path)
+    arch = "aarch64" if platform.machine().lower() in ("arm64", "aarch64") else "x86_64"
+    package_arch = "arm64" if arch == "aarch64" else "x64"
+    package = path.parent / "node_modules" / "@openai" / "codex"
+    # Current optional platform package and older bundled-vendor installs.
+    roots = (
+        package / "node_modules" / "@openai" / f"codex-win32-{package_arch}",
+        path.parent / "node_modules" / "@openai" / f"codex-win32-{package_arch}",
+        package,
+    )
+    for root in roots:
+        vendor = root / "vendor" / f"{arch}-pc-windows-msvc"
+        for relative in ("bin/codex.exe", "codex/codex.exe"):
+            exe = vendor / relative
+            if exe.is_file():
+                return str(exe)
+    return None
 
 
 def find_codex_bin() -> str | None:
     """Locate the ``codex`` CLI, preferring whatever is on PATH."""
     which = shutil.which("codex")
+    if _IS_WINDOWS:
+        if which:
+            exe = _windows_codex_exe(which)
+            if exe:
+                return exe
+        # GUI launches may not inherit npm's user-level PATH entry.
+        appdata = os.environ.get("APPDATA")
+        if appdata:
+            return _windows_codex_exe(os.path.join(appdata, "npm", "codex.cmd"))
+        return None
     if which:
         return which
     for candidate in _BIN_CANDIDATES:
@@ -46,11 +80,43 @@ def find_codex_bin() -> str | None:
     return None
 
 
+def _read_pipe(fd: int, timeout: float) -> bytes:
+    """Read available bytes within timeout; b'' means timeout or EOF."""
+    if not _IS_WINDOWS:
+        ready, _, _ = select.select([fd], [], [], timeout)
+        return os.read(fd, 65536) if ready else b""
+
+    import ctypes
+    import msvcrt
+    from ctypes import wintypes
+
+    peek = ctypes.WinDLL("kernel32", use_last_error=True).PeekNamedPipe
+    peek.argtypes = [wintypes.HANDLE, ctypes.c_void_p, wintypes.DWORD,
+                     ctypes.POINTER(wintypes.DWORD), ctypes.POINTER(wintypes.DWORD),
+                     ctypes.POINTER(wintypes.DWORD)]
+    peek.restype = wintypes.BOOL
+    handle = msvcrt.get_osfhandle(fd)
+    available = wintypes.DWORD()
+    deadline = time.monotonic() + timeout
+    while True:
+        if not peek(handle, None, 0, None, ctypes.byref(available), None):
+            error = ctypes.get_last_error()
+            if error in (109, 232, 233):  # broken, closing, or disconnected pipe
+                return b""
+            raise ctypes.WinError(error)
+        if available.value:
+            return os.read(fd, min(available.value, 65536))
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return b""
+        time.sleep(min(0.01, remaining))
+
+
 def _rate_limits_rpc(codex_bin: str, timeout: float = RPC_TIMEOUT_SECONDS) -> dict[str, Any] | None:
     """Run one ``account/rateLimits/read`` round-trip against ``codex app-server``.
 
-    The read side is hard-bounded by a wall-clock deadline using ``select`` +
-    raw ``os.read`` rather than ``readline``: ``select`` readiness only
+    The read side is hard-bounded by a wall-clock deadline using pipe polling +
+    raw ``os.read`` rather than ``readline``: pipe readiness only
     guarantees at least one byte, so a blocking ``readline`` on a partial line
     with no trailing newline could block past the deadline and hang the refresh
     thread — which, via the widget's single-flight ``_refreshing`` latch, would
@@ -63,6 +129,7 @@ def _rate_limits_rpc(codex_bin: str, timeout: float = RPC_TIMEOUT_SECONDS) -> di
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.DEVNULL,
+        creationflags=subprocess.CREATE_NO_WINDOW if _IS_WINDOWS else 0,
     )
 
     def send(obj: dict[str, Any]) -> None:
@@ -90,10 +157,7 @@ def _rate_limits_rpc(codex_bin: str, timeout: float = RPC_TIMEOUT_SECONDS) -> di
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 break
-            ready, _, _ = select.select([fd], [], [], remaining)
-            if not ready:
-                break
-            chunk = os.read(fd, 65536)
+            chunk = _read_pipe(fd, remaining)
             if not chunk:  # EOF — app-server exited
                 break
             buf += chunk
@@ -105,15 +169,22 @@ def _rate_limits_rpc(codex_bin: str, timeout: float = RPC_TIMEOUT_SECONDS) -> di
                     msg = json.loads(raw.decode("utf-8", "replace"))
                 except ValueError:
                     continue
+                if not isinstance(msg, dict):
+                    continue
                 if msg.get("id") == 1:
+                    if "error" in msg:
+                        return None
                     send({"jsonrpc": "2.0", "method": "initialized"})
                     # The app-server needs a beat between the handshake and the
                     # first real request or it drops it on the floor.
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0.6:
+                        return None
                     time.sleep(0.6)
                     send({"jsonrpc": "2.0", "id": 2,
                           "method": "account/rateLimits/read", "params": {}})
                 elif msg.get("id") == 2:
-                    result = msg.get("result")
+                    return msg.get("result")
     finally:
         try:
             proc.kill()
@@ -214,8 +285,6 @@ def collect_codex(poll_seconds: int = DEFAULT_POLL_SECONDS) -> dict[str, Any]:
         "session_pct": 0.0, "session_reset": 0,
         "weekly_pct": 0.0, "weekly_reset": 0,
     }
-    if os.name != "posix":
-        return {**unavailable, "error": "codex provider is POSIX-only for now"}
     codex_bin = find_codex_bin()
     if codex_bin is None:
         return {**unavailable, "error": "codex binary not found"}
