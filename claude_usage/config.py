@@ -42,7 +42,7 @@ DEFAULT_CONFIG: Config = {
 
     # Which providers to collect. "claude" is always the primary; add "codex"
     # to also poll the local OpenAI Codex CLI (`codex app-server`) and show
-    # its 5h/weekly rings & bars beneath Claude's. POSIX-only.
+    # its 5h/weekly rings & bars beneath Claude's on Linux, macOS, and Windows.
     "providers": ["claude"],
     # How often (seconds) to actually spawn the codex app-server RPC; between
     # polls the on-disk cache is served. The RPC takes a couple of seconds,

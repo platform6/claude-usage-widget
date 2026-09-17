@@ -254,7 +254,8 @@ You get two extra rows in bars view — **Codex 5h** and **Codex 7d** — or a s
 
 - **Data source** — the widget speaks JSON-RPC over stdio to your local `codex app-server` (`account/rateLimits/read`) — the same numbers `codex` reports itself. No scraping, no account data stored or logged.
 - **Cheap** — the RPC is spawned at most once per `codex_poll_seconds` (default 300 s), with an on-disk cache served in between; the read is hard-bounded so a stalled `codex` can never hang a refresh.
-- **Graceful** — the Codex rows auto-hide when the `codex` CLI is missing, logged out, or returns no rate-limit data. POSIX-only for now (Linux/macOS).
+- **Cross-platform** — supports Linux, macOS, and Windows. On Windows, install the CLI with `npm install -g @openai/codex` and authenticate with `codex login`; the widget locates npm's native executable even when the user npm directory is missing from its `PATH`.
+- **Graceful** — the Codex rows auto-hide when the `codex` CLI is missing, logged out, or returns no rate-limit data.
 
 The default `providers` is `["claude"]`, so existing users see no change.
 
@@ -286,7 +287,7 @@ cp config.json.example config.json
 | `statusline_cache_path` | `""` | Path to a statusLine-dumped rate-limit JSON file (see [Statusline-fed rate limits](#statusline-fed-rate-limits)). Empty = disabled. |
 | `usage_endpoint_min_seconds` | `300` | With `statusline_cache_path` set: while the dump is seconds-fresh, `/api/oauth/usage` is called at most once per this many seconds. |
 | `osd_opacity` | `0.75` | OSD background opacity (0.15--1.0) |
-| `providers` | `["claude"]` | Add `"codex"` to also poll the local OpenAI Codex CLI (`codex app-server`) and show its 5h/weekly usage beneath Claude's — an extra ring row in gauge view, two extra bars in bars view. POSIX-only. |
+| `providers` | `["claude"]` | Add `"codex"` to also poll the local OpenAI Codex CLI (`codex app-server`) and show its 5h/weekly usage beneath Claude's — an extra ring row in gauge view, two extra bars in bars view. Supports Linux, macOS, and Windows. |
 | `codex_poll_seconds` | `300` | How often (seconds) to spawn the codex app-server RPC; an on-disk cache is served in between. |
 | `daily_message_limit` | `200` | Daily message limit for local tracking in the popup |
 | `weekly_message_limit` | `1000` | Weekly message limit for local tracking in the popup |
@@ -422,7 +423,7 @@ sudo pacman -S libnotify          # Arch
 - **macOS — blank session/weekly with "No credentials":** Claude Code often stores the token only in the Keychain, and a GUI launch (Finder / Homebrew / a login item) may not have access to it. Launch `claude-usage` once from a Terminal and click **Always Allow** on the Keychain prompt, or export `CLAUDE_CODE_OAUTH_TOKEN`.
 
 ### Codex rows disappeared
-The opt-in Codex rows auto-hide whenever `codex app-server` returns no rate-limit data. The most common cause is an expired OpenAI token — run `codex login` and the rows come back on the next poll. They also stay hidden when the `codex` CLI isn't on `PATH`, and on Windows (the provider is POSIX-only).
+The opt-in Codex rows auto-hide whenever `codex app-server` returns no rate-limit data. Check that `providers` includes `"codex"`, then run `codex login` if authentication has expired. The CLI must be discoverable on `PATH`; Windows also checks the default `%APPDATA%\npm` install location. For a custom Windows install, expose the native `codex.exe` on `PATH` or use the standard npm installation. Restart the widget after changing its configuration or environment.
 
 ### Status shows "Rate limited"
 The usage figures come from Anthropic's `/api/oauth/usage` endpoint, a low-budget endpoint shared with Claude Code. Polling it too often can trip its rate limit; the widget handles this gracefully (it keeps showing your last-known numbers and backs the poll interval off automatically), so it's harmless. If you see it a lot, raise `refresh_seconds` in `config.json`.
